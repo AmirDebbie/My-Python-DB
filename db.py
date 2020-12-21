@@ -11,7 +11,8 @@ class Database():
         if not os.path.exists(self.location):
               os.makedirs(self.location)
 
-    def load(self,table_name):
+    # Getting all the table data
+    def __load(self,table_name):
         try:
             with open(self.location+"/"+table_name+".json") as json_file:
                 return json.load(json_file)
@@ -19,6 +20,7 @@ class Database():
             print(e)
             return False
 
+    # Remove table
     def drop_table(self, table_name):
         try:
             os.remove(self.location+"/"+table_name+".json")
@@ -26,60 +28,80 @@ class Database():
         except Exception as e:
             print(e)
     
-    
+    # Getting all the table data except the metadata
     def load_data(self,table_name):
         try:
             with open(self.location+"/"+table_name+".json") as json_file:
                 return json.load(json_file)["data"]
         except:
             return False
-
-    def checkByParams(entry, params):
+            
+    # Validates all supplied params match supplied data 
+    def __check_by_all_params(self,entry, params):
+        valid_ops = {"gt":">","lt":"<","eq":"==", "gte":">=","lte":"<="} # later add gte & lte
         match = True
-        for k,v in params.items():
-            if not entry[k] == v:
+        for key,value in params.items():
+            if key not in entry:
+                match = False
+                break
+            if isinstance(value,dict):
+                
+                for op,op_value in value.items():
+                    if op in valid_ops:
+                        match = eval(f"{entry[key]} {valid_ops[op]} {op_value}")
+                        if match==False:
+                            break
+                    else:
+                        match = False
+                        break
+            elif not entry[key] == value:
                 match = False
                 break
         return match
-            
-    # if match is True:
-    def load_by_params(self, table_name, params):
-        data = self.load_data(table_name)
-        result = []
-        for entry in data:
-            # match = True
-            # # match = checkByParams(entry, params)
-            # for k,v in params.items():
-            #     if not entry[k] == v:
-            #         match = False
-            #         break
-            match = self.checkByParams(entry, params)
-            if match is True:
-                result.append(entry)
-                
-        return result           
 
-    def load_by_id(self, table_name, id):
-        data = self.load_by_params(table_name, {"id": id})
+    # 
+            
+    # Get by attribuets
+    def find_by_params(self, table_name, params, attrs = "all"):
+        data = self.load_data(table_name)
+        results = []
+        for entry in data:
+            match = self.__check_by_all_params(entry, params)
+            if match == True:
+                if isinstance(attrs,list)==False:
+                    results.append(entry)
+                else: 
+                    single_result = {}
+                    for attr in attrs:
+                        single_result[attr] = entry[attr]
+                    results.append(single_result) 
+        return results           
+
+    # Get by id
+    def find_by_id(self, table_name, id, attrs = "all"):
+        data = self.find_by_params(table_name, {"id": id}, attrs)
         if len(data) > 0: 
             return data[0]
         print("Id not found")
         return False
 
-    def check_data_is_valid(self, table,data):
+    # Validate user input before sending to db
+    def __check_data_is_valid(self, table,data,update=False):
         if not isinstance(data,dict):
             return "Data must be of type dict"
         metadata = table["metadata"]["items"]
+        strictVals = ["id", "createdAt", "updatedAt"]
         for key in list(data.keys()):
             if key not in list(metadata.keys()):
-                print(f'Collumn {key} is not valid, Ignoring...')
-                del data[key]
-        if len(list(data.keys()))==0:
-            return 'No data...'
+                print(f'Column {key} is not valid, Ignoring...')
+                del data[key] 
         for k,v in metadata.items():
-            if v["required"] == True:
-                if k not in data:
-                    return f'Collumn {k} must be supplied'
+            if update==False:
+                if v["required"] == True:
+                    if k not in data:
+                        return f'Column {k} must be supplied'
+            if len(list(data.keys()))==0:
+                return 'No data...'
             if k in data:
                 typeToCheck = self.valid_types[v["type"]]
                 if typeToCheck == "date":
@@ -91,18 +113,20 @@ class Database():
                 else:
                     if isinstance(data[k],typeToCheck)==False:
                         return f'Collumn {k} is not of type {typeToCheck}'
-        table["currentId"]+=1
-        data["id"]= table["currentId"]
-        data["createdAt"] = str(datetime.datetime.now())
-        table["data"].append(data)
+        data["updatedAt"] = str(datetime.datetime.now())
+        if  update == False:
+            table["currentId"]+=1
+            data["id"]= table["currentId"]
+            data["createdAt"] = str(datetime.datetime.now())
+            table["data"].append(data)
         return True
     
-
+    # Add list data in form of a list
     def __write_to_db(self,table_name,data):
         try:
-            table = self.load(table_name)
+            table = self.__load(table_name)
             for entry in data:
-                isValid = self.check_data_is_valid(table,entry)
+                isValid = self.__check_data_is_valid(table,entry)
                 if  isValid!=True:
                     raise Exception(isValid)
             with open(self.location+"/"+table_name+".json", 'w') as json_file:
@@ -112,24 +136,36 @@ class Database():
             print(e)
             return False
 
+    # Add list data in form of a list
     def bulk_add(self,table_name,data):
         if isinstance(data, list)==False:
             print("data needs to be a list")
             return False
         self.__write_to_db(table_name,data) 
         
-    def update(self, table_name, param, data):
-        table = self.load(table_name)
-        valid = self.check_data_is_valid(table, data, update)
+    def update(self, table_name, params, data):
+        table = self.__load(table_name)
+        valid = self.__check_data_is_valid(table, data, True)
+        if valid != True:
+            print(f'{valid} not valid')
+            return valid
         tableHasChanged = False
-        for entry in table.data:
-            match = self.checkByParams(entry, params)
+        index=0
+        count=0
+        for entry in table["data"]:
+            match = self.__check_by_all_params(entry, params)
             if match == True:
+                count+=1
                 tableHasChanged = True
-                entry = data
+                for k,v in data.items():
+                    table["data"][index][k] = v
+                
+                
+            index+=1
         if tableHasChanged == True:
             with open(self.location+"/"+table_name+".json", 'w') as json_file:
                 json.dump(table, json_file)
+            print(f"{count} updated")
                     
 
     def add(self,table_name,data):
@@ -139,15 +175,18 @@ class Database():
             print("format of data is not supported")
             return False
 
-    def delete_by_param(self, table_name,param):
+    def delete_by_params(self, table_name,params):
         try:
-            table = self.load(table_name)
+            table = self.__load(table_name)
             count=0
-            for k,v in table["data"].items():
-                if k in param:
-                    if v == param[k]:
-                        count+=1
-                        del table["data"][k]
+            index=0
+            for entry in table["data"]:
+                match = self.__check_by_all_params(entry,params)
+                if match== True:
+                    count+=1
+                    del table["data"][index]
+                    index-=1
+                index+=1
             with open(self.location+"/"+table_name+".json", 'w') as json_file:
                 json.dump(table, json_file)
             print(f"{count} deleted")
@@ -190,10 +229,14 @@ class Database():
 
 mydate = datetime.datetime.now()
 hi=Database("lala")
-# # hi.create_table("zach",{"lovePizza":{"type":"string"}})
+# # hi.create_table("zach",{"lovePizza":{"type":"string"}})++++
 # # print(hi.bulkAdd("zach",[{"lovePizza":"ya"},{"lovePizza":"5"}]))
 
 # print(hi.loadById("zach",5))
+print(
+    # hi.delete_by_params("zach",{"lovePizza":"ya"})
 
+    hi.find_by_params("zach", {"id":{"eqx":1}})
+)
 
-hi.drop_table("zach")
+# hi.drop_table("zach")
